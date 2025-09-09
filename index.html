@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Curved Line (Viz Extension)</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://extensions.tableauusercontent.com/resources/tableau.extensions.1.latest.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="chartRoot" class="chart-root"></div>
+  <div id="status" class="status">Cargando…</div>
+
+  <div class="controls">
+    <label>Curve
+      <select id="curveSelect">
+        <option value="basis">Basis</option>
+        <option value="cardinal" selected>Cardinal</option>
+        <option value="monotoneX">MonotoneX</option>
+        <option value="catmullRom">Catmull–Rom</option>
+        <option value="natural">Natural</option>
+      </select>
+    </label>
+    <label id="tensionWrap">Tension
+      <input id="tensionInput" type="range" min="0" max="1" step="0.05" value="0.5" />
+      <output id="tensionOut">0.50</output>
+    </label>
+    <label>BG
+      <input id="bgColor" type="color" value="#0b1020" />
+    </label>
+    <label>Line
+      <input id="lineColor" type="color" value="#22aaff" />
+    </label>
+    <label>Text
+      <input id="textColor" type="color" value="#e8eefb" />
+    </label>
+    <label>Área
+      <input id="areaToggle" type="checkbox" />
+    </label>
+    <label>Líneas de ejes
+      <input id="axisLinesToggle" type="checkbox" checked />
+    </label>
+    <label>Valores en puntos
+      <input id="pointValuesToggle" type="checkbox" />
+    </label>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

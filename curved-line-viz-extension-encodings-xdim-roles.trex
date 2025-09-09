@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest manifest-version="0.1" xmlns="http://www.tableau.com/xml/extension_manifest">
+  <worksheet-extension id="com.ed.curvedline.viz.enc" extension-version="1.0.3">
+    <default-locale>es</default-locale>
+    <name resource-id="name"/>
+    <description>Curved line chart (Viz Extension) con tiles X/Y/Series en Marks usando encodings.</description>
+    <author name="Ed" website="https://example.com" email="ed@example.com" organization="Your Org"/>
+    <min-api-version>1.9</min-api-version>
+
+    <source-location>
+      <url>http://localhost:8765/index.html</url>
+    </source-location>
+
+    <icon>
+      iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+7YxQAAAAASUVORK5CYII=
+    </icon>
+
+    <!-- X acepta string/numeric/temporal como dimensión; permite tanto discreta como continua -->
+    <encoding id="x">
+      <display-name>X</display-name>
+      <data-spec>
+        <data-type>string</data-type>
+        <data-type>numeric</data-type>
+        <data-type>temporal</data-type>
+      </data-spec>
+      <role-spec>
+        <role-type>discrete-dimension</role-type>
+        <role-type>continuous-dimension</role-type>
+      </role-spec>
+      <fields max-count="1"/>
+      <encoding-icon token="letter-x"/>
+    </encoding>
+
+    <!-- Y: medida continua numérica -->
+    <encoding id="y">
+      <display-name>Y</display-name>
+      <data-spec>
+        <data-type>numeric</data-type>
+      </data-spec>
+      <role-spec>
+        <role-type>continuous-measure</role-type>
+      </role-spec>
+      <fields max-count="1"/>
+      <encoding-icon token="letter-y"/>
+    </encoding>
+
+    <!-- Series: dimensión discreta (string/numeric/temporal como discreto) -->
+    <encoding id="series">
+      <display-name>Series</display-name>
+      <data-spec>
+        <data-type>string</data-type>
+        <data-type>numeric</data-type>
+        <data-type>temporal</data-type>
+      </data-spec>
+      <role-spec>
+        <role-type>discrete-dimension</role-type>
+      </role-spec>
+      <fields max-count="1"/>
+      <encoding-icon token="color"/>
+    </encoding>
+  </worksheet-extension>
+
+  <resources>
+    <resource id="name">
+      <text locale="es">Curved Line (Viz Extension)</text>
+      <text locale="en_US">Curved Line (Viz Extension)</text>
+    </resource>
+  </resources>
+</manifest>
