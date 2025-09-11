@@ -5,6 +5,7 @@
 // text color, axis lines toggle, area gradient, point value labels, shadows, white-dot style.
 
 const state = {
+  hiddenSeries: new Set(),
   options: {
     curve: 'cardinal',
     tension: 0.5,
@@ -13,9 +14,157 @@ const state = {
     textColor: '#e8eefb', // axis/ticks/labels
     axisLines: true,      // show axis domain/tick lines
     areaFill: false,      // draw gradient area under line
-    showPointValues: false // show Y labels at points
+    showPointValues: false,
+    showLegend: true // show Y labels at points
   }
 };
+
+
+// ---- Formatting helpers ----
+function firstFormattedCell(data, colIdx) {
+  if (!Array.isArray(data)) return null;
+  for (let i = 0; i < data.length; i++) {
+    const c = (data[i] || [])[colIdx];
+    if (c && typeof c === 'object') {
+      if (c.formattedValue != null) return c;
+      if ('value' in c) return c;
+    }
+    if (c != null) return { value: c, formattedValue: String(c) };
+  }
+  return null;
+}
+
+function countDecimalsFromSample(sampleStr) {
+  if (!sampleStr || typeof sampleStr !== 'string') return null;
+  // remove currency symbols and percent sign for counting
+  const s = sampleStr.replace(/[^0-9,.\-]/g, '');
+  const lastComma = s.lastIndexOf(',');
+  const lastDot = s.lastIndexOf('.');
+  const sep = Math.max(lastComma, lastDot);
+  if (sep >= 0) {
+    const decs = s.length - sep - 1;
+    return decs >= 0 && decs <= 6 ? decs : null;
+  }
+  return 0;
+}
+
+
+function deriveYFormatter(columns, data, idxY) {
+  // Try to infer format from column metadata and sample formatted values,
+  // so we mirror Tableau's "Numbers" as close as possible.
+  function walkValues(obj, cb, path=[]) {
+    if (!obj || typeof obj !== 'object') return;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      cb(k, v, path.concat(k));
+      if (v && typeof v === 'object') walkValues(v, cb, path.concat(k));
+    }
+  }
+
+  const col = (Array.isArray(columns) && columns[idxY]) ? columns[idxY] : null;
+  const hints = { currencyCode:null, currencySymbol:null, decimals:null, percent:false, parenNeg:false };
+
+  // 1) Pull hints from column metadata if present
+  if (col) {
+    walkValues(col, (k, v) => {
+      const key = String(k).toLowerCase();
+      if (key.includes('currency')) {
+        if (typeof v === 'string' && v.length <= 6) {
+          // e.g., 'USD'
+          if (/^[A-Z]{3}$/.test(v)) hints.currencyCode = v;
+          // e.g., '$'
+          if (/[$€£¥₡]/.test(v)) hints.currencySymbol = v.match(/[$€£¥₡]/)?.[0];
+        }
+        if (typeof v === 'object' && typeof v.code === 'string') hints.currencyCode = v.code;
+        if (typeof v === 'object' && typeof v.symbol === 'string') hints.currencySymbol = v.symbol;
+      }
+      if (key.includes('decimal') && typeof v === 'number') {
+        if (v >= 0 && v <= 6) hints.decimals = v;
+      }
+      if (key.includes('percent') && (v === true || v === 'true')) {
+        hints.percent = true;
+      }
+      if (key.includes('format') && typeof v === 'string') {
+        // parse common Tableau-like patterns e.g. $#,##0.00;(#,##0.00)
+        if (/[()];\([^\)]*\)/.test(v)) hints.parenNeg = true; // pattern defines negative as parentheses
+        if (/%/.test(v)) hints.percent = true;
+        const dot = v.split(';')[0].match(/\.(0+)/);
+        if (dot) hints.decimals = Math.min(6, dot[1].length);
+        if (/[$€£¥₡]/.test(v)) hints.currencySymbol = v.match(/[$€£¥₡]/)[0];
+      }
+    });
+  }
+
+  // 2) Collect samples from data formatted values
+  const samples = [];
+  if (Array.isArray(data)) {
+    for (let i = 0; i < data.length && samples.length < 200; i++) {
+      const cell = (data[i] || [])[idxY];
+      if (!cell) continue;
+      const f = (cell && typeof cell === 'object' && 'formattedValue' in cell) ? String(cell.formattedValue)
+                : (cell && typeof cell === 'object' && 'value' in cell ? String(cell.value) : String(cell));
+      samples.push(f);
+    }
+  }
+
+  // infer from samples
+  const symCount = {};
+  let hasPercent = hints.percent;
+  let decimalsSeen = [];
+  let parenNeg = hints.parenNeg;
+
+  for (const s of samples) {
+    if (!s) continue;
+    if (/%/.test(s)) hasPercent = true;
+    const mCur = s.match(/[$€£¥₡]/);
+    if (mCur) symCount[mCur[0]] = (symCount[mCur[0]] || 0) + 1;
+    if (/\(.*\)/.test(s) && /-/.test(s) === false) parenNeg = true;
+    // count decimals
+    const clean = s.replace(/[^0-9,.\-]/g,'');
+    const lastComma = clean.lastIndexOf(',');
+    const lastDot = clean.lastIndexOf('.');
+    const sep = Math.max(lastComma, lastDot);
+    if (sep >= 0) decimalsSeen.push(clean.length - sep - 1);
+  }
+
+  const symbolFromSamples = Object.entries(symCount).sort((a,b)=>b[1]-a[1])[0]?.[0];
+  if (!hints.currencySymbol && symbolFromSamples) hints.currencySymbol = symbolFromSamples;
+  if (hasPercent) hints.percent = true;
+  if (hints.decimals == null && decimalsSeen.length) {
+    // pick the mode, clamp 0..6
+    const freq = {}; for (const d of decimalsSeen) freq[d]=(freq[d]||0)+1;
+    const mode = Object.entries(freq).sort((a,b)=>b[1]-a[1])[0][0];
+    hints.decimals = Math.min(6, Math.max(0, parseInt(mode,10)));
+  }
+  hints.parenNeg = parenNeg;
+
+  // 3) Construct formatter
+  const locale = (navigator.language || 'es-CR');
+  const digits = (hints.decimals != null ? hints.decimals : 0);
+
+  if (hints.percent) {
+    const nf = new Intl.NumberFormat(locale, { style:'percent', minimumFractionDigits:digits, maximumFractionDigits:digits });
+    return (v) => nf.format(+v);
+  }
+
+  if (hints.currencySymbol || hints.currencyCode) {
+    const codeMap = { '$':'USD', '€':'EUR', '£':'GBP', '¥':'JPY', '₡':'CRC' };
+    const code = hints.currencyCode || codeMap[hints.currencySymbol] || 'USD';
+    const nf = new Intl.NumberFormat(locale, { style:'currency', currency:code, minimumFractionDigits:digits, maximumFractionDigits:digits });
+    if (hints.parenNeg) {
+      return (v) => v < 0 ? '(' + nf.format(Math.abs(v)) + ')' : nf.format(v);
+    }
+    return (v) => nf.format(+v);
+  }
+
+  // Plain number
+  const nf = new Intl.NumberFormat(locale, { minimumFractionDigits:digits, maximumFractionDigits:digits });
+  if (hints.parenNeg) {
+    return (v) => v < 0 ? '(' + nf.format(Math.abs(v)) + ')' : nf.format(v);
+  }
+  return (v) => nf.format(+v);
+}
+
 
 document.addEventListener('DOMContentLoaded', init);
 
@@ -32,6 +181,7 @@ async function init() {
     const areaToggle = document.getElementById('areaToggle');
     const axisToggle = document.getElementById('axisLinesToggle');
     const pointValsToggle = document.getElementById('pointValuesToggle');
+    const legendToggle = document.getElementById('legendToggle');
 
     if (curveSel) curveSel.addEventListener('change', (e) => {
       state.options.curve = e.target.value;
@@ -70,6 +220,14 @@ async function init() {
       pointValsToggle.checked = !!state.options.showPointValues;
       pointValsToggle.addEventListener('change', (e) => { state.options.showPointValues = !!e.target.checked; renderFromEncodings(); });
     }
+    if (legendToggle) {
+      legendToggle.checked = state.options.showLegend !== false;
+      legendToggle.addEventListener('change', (e) => {
+        state.options.showLegend = !!e.target.checked;
+        renderFromEncodings();
+      });
+    }
+
 
     subscribeToWorksheetEvents();
     await renderFromEncodings();
@@ -296,7 +454,8 @@ async function renderFromEncodings() {
       return av - bv;
     });
 
-    drawChart({ rows, dimType: asDate ? 'date' : (asNum ? 'number' : 'string') });
+    const formatY = deriveYFormatter(columns, data, iY);
+    drawChart({ rows, dimType: asDate ? 'date' : (asNum ? 'number' : 'string'), formatY });
     setStatus(`✅ Renderizado: ${rows.length} puntos`);
   } catch (e) {
     console.error(e);
@@ -316,7 +475,7 @@ function curveFactory() {
   }
 }
 
-function drawChart({ rows, dimType }) {
+function drawChart({ rows, dimType, formatY }) {
   const root = document.getElementById('chartRoot');
   root.innerHTML = '';
 
@@ -343,18 +502,22 @@ function drawChart({ rows, dimType }) {
     if (cleaned.length) seriesData.push({ key, pts: cleaned });
   }
 
+  const visibleSeries = seriesData.filter(s => !(state.hiddenSeries && state.hiddenSeries.has(s.key)));
+  const domainSeries = visibleSeries.length ? visibleSeries : seriesData;
+
+
   // Scales
   let xDomain;
-  if (dimType === 'date')      xDomain = d3.extent(seriesData.flatMap(s => s.pts.map(d => new Date(d.x))));
-  else if (dimType === 'number') xDomain = d3.extent(seriesData.flatMap(s => s.pts.map(d => +d.x)));
-  else                          xDomain = Array.from(new Set(seriesData.flatMap(s => s.pts.map(d => d.x))));
+  if (dimType === 'date')      xDomain = d3.extent(domainSeries.flatMap(s => s.pts.map(d => new Date(d.x))));
+  else if (dimType === 'number') xDomain = d3.extent(domainSeries.flatMap(s => s.pts.map(d => +d.x)));
+  else                          xDomain = Array.from(new Set(domainSeries.flatMap(s => s.pts.map(d => d.x))));
 
   let x;
   if (dimType === 'string') x = d3.scalePoint().domain(xDomain).range([0, innerW]).padding(0.5);
   else if (dimType === 'date') x = d3.scaleTime().domain(xDomain).range([0, innerW]);
   else x = d3.scaleLinear().domain(xDomain).range([0, innerW]);
 
-  let yExtent = d3.extent(seriesData.flatMap(s => s.pts.map(d => d.y)));
+  let yExtent = d3.extent(domainSeries.flatMap(s => s.pts.map(d => d.y)));
   if (!yExtent || yExtent[0] == null || yExtent[1] == null) yExtent = [0,1];
   let yDomain = yExtent;
   if (yDomain[0] === yDomain[1]) {
@@ -365,7 +528,9 @@ function drawChart({ rows, dimType }) {
 
   // Axes
   const xAxisG = g.append('g').attr('class','x-axis').attr('transform', `translate(0,${innerH})`).call(d3.axisBottom(x));
-  const yAxisG = g.append('g').attr('class','y-axis').call(d3.axisLeft(y));
+  const yAxis = d3.axisLeft(y);
+  if (typeof formatY === 'function') yAxis.tickFormat(formatY);
+  const yAxisG = g.append('g').attr('class','y-axis').call(yAxis);
   const tcol = (state.options && state.options.textColor) ? state.options.textColor : '#e8eefb';
   const axisOpacity = (state.options && state.options.axisLines) ? 0.5 : 0;
   xAxisG.selectAll('text').attr('fill', tcol);
@@ -374,7 +539,7 @@ function drawChart({ rows, dimType }) {
   yAxisG.selectAll('path,line').attr('stroke', tcol).attr('opacity', axisOpacity);
 
   const palette = d3.scaleOrdinal(d3.schemeTableau10).domain(seriesData.map(s => s.key));
-  const useCustomColor = !!(state.options && state.options.lineColor);
+  const useCustomColor = !!(state.options && state.options.lineColor) && seriesData.length === 1;
 
   const line = d3.line()
     .defined(d => Number.isFinite(d.y) && d.x != null)
@@ -382,7 +547,7 @@ function drawChart({ rows, dimType }) {
     .x(d => dimType === 'date' ? x(new Date(d.x)) : (dimType === 'number' ? x(+d.x) : x(d.x)))
     .y(d => y(d.y));
 
-  for (const { key, pts } of seriesData) {
+  for (const { key, pts } of visibleSeries) {
     const strokeCol = useCustomColor ? state.options.lineColor : palette(key);
 
     // Optional area under line with gradient
@@ -470,9 +635,63 @@ function drawChart({ rows, dimType }) {
         .attr('font-size', 10)
         .attr('fill', lblCol)
         .attr('pointer-events', 'none')
-        .text(d => (d.yLabel != null && d.yLabel !== '') ? d.yLabel : (Number.isFinite(d.y) ? d3.format('~g')(d.y) : ''));
-    }
+        .text(d => (typeof formatY === 'function')
+          ? formatY(d.y)
+          : ((d.yLabel != null && d.yLabel !== '')
+              ? d.yLabel
+              : (Number.isFinite(d.y) ? d3.format('~g')(d.y) : '')));    }
   }
+
+  // ---- Legend – toggle ----
+  if (state.options.showLegend !== false && seriesData.length > 0) {
+    const legend = svg.append('g').attr('class','legend');
+    const pad = 8, sw = 16, gap = 6, rowH = 22;
+    const items = seriesData.map(s => ({
+      key: s.key,
+      color: (seriesData.length === 1 && state.options.lineColor) ? state.options.lineColor : palette(s.key),
+      hidden: !!(state.hiddenSeries && state.hiddenSeries.has(s.key))
+    }));
+    const gItems = legend.selectAll('g.item')
+      .data(items, d => d.key)
+      .enter().append('g')
+      .attr('class','item')
+      .style('cursor','pointer')
+      .attr('transform', (d,i) => `translate(${margin.left + pad},${margin.top + pad + i*rowH})`)
+      .attr('opacity', d => d.hidden ? 0.6 : 1);
+
+    gItems.append('line')
+      .attr('x1',0).attr('y1',8).attr('x2',sw).attr('y2',8)
+      .attr('stroke', d => d.color).attr('stroke-width', 4).attr('stroke-linecap','round')
+      .attr('opacity', d => d.hidden ? 0.4 : 1);
+
+    gItems.append('circle')
+      .attr('cx', sw/2).attr('cy',8).attr('r',3)
+      .attr('fill','#fff').attr('opacity', d => d.hidden ? 0.4 : 0.8)
+      .attr('stroke', d => d.color).attr('stroke-width',1);
+
+    gItems.append('text')
+      .attr('x', sw + gap).attr('y', 11)
+      .text(d => d.key)
+      .attr('fill', state.options.textColor || '#e8eefb')
+      .attr('font-size', 12)
+      .attr('opacity', d => d.hidden ? 0.6 : 1);
+
+    gItems.on('click', (e,d) => {
+      if (!state.hiddenSeries) state.hiddenSeries = new Set();
+      if (state.hiddenSeries.has(d.key)) state.hiddenSeries.delete(d.key);
+      else state.hiddenSeries.add(d.key);
+      renderFromEncodings();
+    });
+
+    // background
+    const bbox = legend.node().getBBox();
+    legend.insert('rect', ':first-child')
+      .attr('x', bbox.x - pad).attr('y', bbox.y - pad)
+      .attr('width', bbox.width + pad*2).attr('height', bbox.height + pad*2)
+      .attr('rx', 8).attr('ry', 8)
+      .attr('fill', 'rgba(0,0,0,0.35)').attr('stroke', 'rgba(255,255,255,0.05)');
+  }
+
 }
 
 function prepSeriesPoints(pts, dimType) {
